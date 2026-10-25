@@ -54,7 +54,7 @@ Heartbeat-продление аренды, `LISTEN/NOTIFY` вместо опро
 | Миграции | `github.com/pressly/goose/v3`, SQL встроен через `embed`, применяется подкомандой `taskq migrate up` |
 | Метрики | `github.com/prometheus/client_golang` |
 | Интеграционные тесты | `github.com/testcontainers/testcontainers-go` (модуль postgres) |
-| Линтер | golangci-lint v2, закреплён в проекте через директиву `tool` в `go.mod` и запускается как `go tool golangci-lint run`. Глобальный golangci-lint v1 не трогаем |
+| Линтер | golangci-lint v2, закреплён директивой `tool` в отдельном `tools/go.mod` (чтобы не засорять основной `go.mod`), запуск `go tool -modfile=tools/go.mod golangci-lint run ./...`. Глобальный golangci-lint v1 не трогаем |
 | Моки | только написанные руками fake-реализации, без mockgen |
 | CI | GitHub Actions |
 
@@ -86,11 +86,11 @@ taskq/
 **Зависимости между пакетами:** `api → job, metrics`, `worker → job, metrics`, `store → job`, `handlers → job`, `metrics → job`. Пакеты `api` и `worker` не знают ни друг о друге, ни о `store` и `handlers`, всё связывает `main`. Общаются `api` и `worker` только через таблицу `jobs`.
 
 **Интерфейсы объявляет потребитель:**
-- `worker` объявляет свой интерфейс `Store` (`Claim`, `Complete`, `Fail`) и `Handlers` (`Get(type) (Handler, bool)`);
+- `worker` объявляет свой интерфейс `Store` (`Claim`, `Complete`, `Fail`) и `Registry` (`Get(type) (job.Handler, bool)`);
 - `api` объявляет свой интерфейс `Store` (`Create`, `Get`, `List`, `Retry`) и `Validator` (`Validate(type string, payload json.RawMessage) error`);
 - пакет `store` экспортирует конкретный тип `*store.Postgres` и ни о каких интерфейсах не знает.
 
-**Интерфейс обработчика** (`handlers`):
+**Интерфейс обработчика** объявлен в `job`, а не в `handlers`. Если бы `Registry.Get` возвращал `handlers.Handler`, `*Registry` не удовлетворил бы интерфейс воркера с `worker.Handler`, потому что сигнатуры методов в Go должны совпадать точно:
 ```go
 type Handler interface {
     Handle(ctx context.Context, payload json.RawMessage) error
@@ -101,7 +101,7 @@ type PayloadValidator interface {
     ValidatePayload(payload json.RawMessage) error
 }
 ```
-Реестр `handlers.Registry` реализует и `Validator` для `api` (неизвестный тип или невалидный payload дают ошибку), и `Handlers` для `worker`. Чтобы добавить новый тип задачи, достаточно нового файла в `handlers` и регистрации в `main`.
+Реестр `handlers.Registry` реализует и `Validator` для `api` (неизвестный тип или невалидный payload дают ошибку), и `Registry` для `worker`. ID задачи и номер попытки обработчик получает из контекста: `job.WithMeta` / `job.MetaFrom`. Чтобы добавить новый тип задачи, достаточно нового файла в `handlers` и регистрации в `main`.
 
 ## 5. HTTP API
 
@@ -237,7 +237,7 @@ signal.NotifyContext(SIGINT, SIGTERM) → rootCtx
 - Обработчик берётся из реестра по `type`. Если тип неизвестен, задача сразу уходит в `dead` (Permanent).
 
 ### 8.2 Дерево контекстов
-- `rootCtx` отменяется по сигналу, от него зависит **только поллер**.
+- `rootCtx` отменяется по сигналу, от него зависит **только поллер**. Сам `Claim` выполняется в `context.WithTimeout(context.WithoutCancel(rootCtx), 5s)`: если отменить запрос, который сервер уже закоммитил, задачи останутся в `running` до истечения аренды.
 - `workCtx` — отдельный контекст от `context.Background()`. Он отменяется только по истечении `SHUTDOWN_TIMEOUT`.
 - Задача выполняется в `jobCtx = context.WithTimeout(workCtx, JOB_TIMEOUT)`.
 - `Complete` и `Fail` выполняются в `context.WithTimeout(context.WithoutCancel(jobCtx), 5s)`. Даже если задачу отменили, её результат всё равно запишется.
