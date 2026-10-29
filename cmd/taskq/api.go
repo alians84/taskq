@@ -15,9 +15,14 @@ func runAPI(ctx context.Context) error {
 		return err
 	}
 
+	ln, err := listen(ctx, cfg.HTTPAddr)
+	if err != nil {
+		pool.Close()
+		return err
+	}
+
 	var shuttingDown atomic.Bool
 	srv := &http.Server{
-		Addr: cfg.HTTPAddr,
 		Handler: api.NewHandler(api.Deps{
 			Log:            log,
 			DB:             pool,
@@ -27,7 +32,7 @@ func runAPI(ctx context.Context) error {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	err = serve(ctx, log, srv, cfg.ShutdownTimeout, func() { shuttingDown.Store(true) })
+	err = serve(ctx, log, srv, ln, cfg.ShutdownTimeout, func() { shuttingDown.Store(true) })
 	pool.Close()
 	log.InfoContext(ctx, "shutdown complete")
 	return err
