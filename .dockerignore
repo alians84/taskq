@@ -1,0 +1,10 @@
+.git
+.github
+.superpowers
+.idea
+.vscode
+bin
+docs
+tasks
+tools
+CLAUDE.local.md
