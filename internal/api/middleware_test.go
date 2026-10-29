@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"regexp"
 	"strings"
 	"testing"
@@ -86,4 +87,33 @@ func TestRecover_PanicReturns500AndServerKeepsWorking(t *testing.T) {
 
 	rec = do(t, h, http.MethodGet, "/ok", nil)
 	assertJSON(t, rec, http.StatusOK, `{"status":"ok"}`)
+}
+
+func TestRecover_PanicAfterHeadersAbortsResponse(t *testing.T) {
+	var logs bytes.Buffer
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /half", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"partial":`))
+		panic("boom")
+	})
+	h := withMiddleware(slog.New(slog.NewJSONHandler(&logs, nil)), mux)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/half", nil)
+	func() {
+		defer func() {
+			if v := recover(); v != http.ErrAbortHandler { //nolint:errorlint // sentinel compared by identity, as net/http does
+				t.Errorf("panic value = %v, want http.ErrAbortHandler so net/http drops the connection", v)
+			}
+		}()
+		h.ServeHTTP(rec, req)
+	}()
+
+	if strings.Contains(rec.Body.String(), "internal error") {
+		t.Errorf("body = %q: an error body must not be appended to an already started response", rec.Body.String())
+	}
+	if !strings.Contains(logs.String(), "http handler panic") {
+		t.Errorf("logs do not contain the original panic:\n%s", logs.String())
+	}
 }

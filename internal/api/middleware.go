@@ -54,15 +54,23 @@ func newRequestID() string {
 	return hex.EncodeToString(b)
 }
 
-// statusRecorder remembers the status code written by the wrapped handler.
+// statusRecorder remembers the status code written by the wrapped handler
+// and whether the response has already started.
 type statusRecorder struct {
 	http.ResponseWriter
-	status int
+	status      int
+	wroteHeader bool
 }
 
 func (r *statusRecorder) WriteHeader(code int) {
 	r.status = code
+	r.wroteHeader = true
 	r.ResponseWriter.WriteHeader(code)
+}
+
+func (r *statusRecorder) Write(b []byte) (int, error) {
+	r.wroteHeader = true
+	return r.ResponseWriter.Write(b)
 }
 
 func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
@@ -89,14 +97,17 @@ func logging(log *slog.Logger) func(http.Handler) http.Handler {
 func recoverer(log *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			defer recoverPanic(w, r, log)
-			next.ServeHTTP(w, r)
+			rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+			defer recoverPanic(rec, r, log)
+			next.ServeHTTP(rec, r)
 		})
 	}
 }
 
 // recoverPanic must be called directly by defer: recover only works there.
-func recoverPanic(w http.ResponseWriter, r *http.Request, log *slog.Logger) {
+// If the response has already started, a 500 can no longer be sent, so the
+// connection is aborted instead of appending an error to a half-written body.
+func recoverPanic(w *statusRecorder, r *http.Request, log *slog.Logger) {
 	v := recover()
 	if v == nil {
 		return
@@ -109,5 +120,8 @@ func recoverPanic(w http.ResponseWriter, r *http.Request, log *slog.Logger) {
 		"stack", string(debug.Stack()),
 		"request_id", requestIDFrom(r.Context()),
 	)
+	if w.wroteHeader {
+		panic(http.ErrAbortHandler)
+	}
 	writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 }
